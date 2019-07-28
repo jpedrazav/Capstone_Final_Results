@@ -1,0 +1,1156 @@
+---
+title: "Capstone Project - Julian Pedraza - 500929362"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# INTRUSION DETECTION CLASSIFICATION MODEL
+
+## 0. Preparation
+
+install.packages("FSelector")
+install.packages("FSelectorRcpp", dependencies = TRUE)
+install.packages("randomForest")
+install.packages("ROSE")
+install.packages("caret")
+install.packages("kernlab")
+install.packages('ggplot2') #needed for ggplot
+install.packages('DAAG') #needed for CVbinary
+
+
+```{r, echo=FALSE, results='hide', warning=FALSE}
+library(kernlab) #needed for ??
+library(dplyr) #needed for %>%
+library(e1071) #needed for Kurtosis
+library(caret) #needed for nearZeroVar
+library(FSelectorRcpp) #needed for gain1
+library(FSelector) #needed for gain2 (Fselector)
+library(ROSE) #needed for ovun.sample (undersampling)
+library(randomForest)
+library(ggplot2)
+library(DAAG)
+```
+
+## 1. UNIVARIATE ANALYSIS
+### 1.1. Load data
+
+The following dataset is a revised version of the original KDD99 - Training set, Hive has been used to create a subset that excludes the duplicated records, additionally, the "new_class" attribute was created as the target for the classification algorithm.
+
+```{r, warning=FALSE}
+train_dist_newclass <- read.csv("D:\\0 - Julian\\2 - Ryerson\\136 - Capstone\\1 - Project\\1 - Work\\Data\\1 - Distinct\\train_distinct_newclass.csv", header = F)
+```
+
+### 1.2 Include headers as shown in the data dictionary
+
+```{r, warning=FALSE}
+train_colnames_newclass <- c("duration", "protocol_type", "service", "flag", "src_bytes", "dst_bytes", "land", "wrong_fragment", "urgent", "hot", "num_failed_logins", "logged_in", "num_compromised", "root_shell", "su_attempted", "num_root", "num_file_creations", "num_shells", "num_access_files", "num_outbound_cmds", "is_host_login", "is_guest_login", "count", "srv_count", "serror_rate", "srv_serror_rate", "rerror_rate", "srv_rerror_rate", "same_srv_rate", "diff_srv_rate", "srv_diff_host_rate", "dst_host_count", "dst_host_srv_count", "dst_host_same_srv_rate", "dst_host_diff_srv_rate", "dst_host_same_src_port_rate", "dst_host_srv_diff_host_rate", "dst_host_serror_rate", "dst_host_srv_serror_rate", "dst_host_rerror_rate", "dst_host_srv_rerror_rate", "class", "new_class")
+train_dist_newclass_label<- setNames(train_dist_newclass, train_colnames_newclass)
+class(train_colnames_newclass)
+```
+
+### 1.3. Summary
+
+The "new_class" attribute will consolidate the results in two levels. The first one "normal" includes the normal connections, while "attack" includes all non-normal connections. This process will also help balance the dependent variable a little bit more. (Ratio Normal:Attack = 3.1). The processing of this new attribute was made using Hive as a tool.
+
+```{r, warning=FALSE}
+summary(train_dist_newclass)
+
+```
+
+### 1.4. Structure of database 
+
+#### 1.4.1. Variable type (Original definition)
+
+```{r, warning=FALSE}
+str(train_dist_newclass_label)
+
+```
+
+#### 1.4.2. Various attributes have to be assigned as factors
+
+```{r, warning=FALSE}
+train_dist_newclass_label$land <- as.factor((train_dist_newclass_label$land))
+train_dist_newclass_label$logged_in <- as.factor((train_dist_newclass_label$logged_in))
+train_dist_newclass_label$root_shell <- as.factor((train_dist_newclass_label$root_shell))
+train_dist_newclass_label$su_attempted <- as.factor((train_dist_newclass_label$su_attempted))
+train_dist_newclass_label$is_host_login <- as.factor((train_dist_newclass_label$is_host_login))
+train_dist_newclass_label$is_guest_login <- as.factor((train_dist_newclass_label$is_guest_login))
+
+```
+
+#### 1.4.3.Change "new_class" attribute to logical
+
+The class attribute for initial analisis is required to be logical, in further analysis the data type will change back to factor
+
+```{r, warning=FALSE}
+train_dist_newclass_label$new_class <- as.logical(train_dist_newclass_label$new_class)
+```
+
+
+#### 1.4.4. Confirmation of new data structure
+
+```{r, warning=FALSE}
+str(train_dist_newclass_label)
+```
+
+### 1.5. Summary of dataset
+
+```{r, warning=FALSE}
+summary(train_dist_newclass_label)
+```
+
+### 1.6. Analysis of Numeric Attributes
+
+#### 1.6.1. Histogram (2x2)
+
+
+```{r, results='hide',fig.keep='all', warning=FALSE}
+par(mfrow = c (2,2))
+sapply(names(train_dist_newclass_label), function(cname){
+  if(is.numeric(train_dist_newclass_label[[cname]]))
+    print(hist(train_dist_newclass_label[[cname]], main = cname))
+})
+
+```
+
+Comments about histograms:
+
+- For most of the attributes, the normality test is not required, the histogram reflects that they are not following a theoretical normal distribution.
+- When analyzing the data distribution for numerical attributes, it is easy to confirm that for most of them, data is lying in value zero (0)  
+- For the attributes labeded as rate, data lies mostly in the values zero (0) and one (1).
+
+#### 1.6.2. Blox Plot
+
+```{r, results='hide', fig.keep='all', warning=FALSE}
+par(mfrow = c (2,2))
+sapply(names(train_dist_newclass_label), function(cname){
+  if(is.numeric(train_dist_newclass_label[[cname]]))
+    print(boxplot(train_dist_newclass_label[[cname]], main = cname))
+})
+
+```
+
+
+Comments about box plots:
+
+- As seen in the histogram, for most of the attributes, data is mainly concentrated in zero (0) value. 
+- Mean, median, and quartiles are not divisible, all of them are shown very  close to where the data is concentrated
+- For attributes as dst_bytes and wrong fragment, there are noticeble data points, that could be evaluated as outliers. Further analysis will demonstrate if they are, and if they could be removed.
+
+
+
+#### 1.6.3. Outliers (Initial Analysis)
+
+As most of the data is concentrated in value zero (0), the outliers will be most of the data that is different than 0. 
+
+One good example that represents this approach is the attribute dst_bytes. As shown below, Outvals contains 139112 observations that are considered outliers.
+
+```{r, warning=FALSE}
+dst_bytes_range <- range(train_dist_newclass_label$dst_bytes)
+dst_bytes_range
+dst_bytes_out <- boxplot(train_dist_newclass_label$dst_bytes, plot=FALSE)$out
+range(dst_bytes_out) #range of outliers for dst_bytes_out
+```
+
+Arbitrarly 3 breaks were created based on the range of the data to identify were the "real" outliers are located for dst_bytes attribute. The result shows that most of them are less than 400K. 
+
+```{r, warning=FALSE}
+break_out <- c(4000, 400000, 40000000, 4000000000)
+a_cut <- cut(dst_bytes_out, break_out, right = F)
+a_freq <- as.matrix(table(a_cut))
+rownames(a_freq) <- c("4K - 400K", "400K - 40M", "40M - 4000M")
+colnames(a_freq) <- c("Outlier Freq Dist(dst_bytes)")
+a_freq
+```
+
+The next step will be to identify which of the actual outliers can be dropped or modified from the analysis.
+
+
+
+
+#### 1.6.4. Outliers processing
+
+##### 1.6.4.1. Attribute "Duration"
+
+```{r, warning=FALSE}
+dur_range <- range(train_dist_newclass_label$duration)
+dur_range
+dur_out <- boxplot(train_dist_newclass_label$duration, plot=FALSE)$out
+range(dur_out) #range of outliers for dst_bytes_out
+```
+As with the other variables, given the majority of data as value "0", everything different than that, is being considered outlier.
+
+```{r, warning=FALSE}
+dur1 <- subset(train_dist_newclass_label[(train_dist_newclass_label$duration != 0),], select = c("duration","new_class")) #based on outlier threshold
+hist(dur1$duration)
+print(barplot(prop.table(table(dur1$new_class)), main = "proportion duration / class", las = 2, cex.names = 0.7))
+```
+
+
+```{r, warning=FALSE}
+dur_break <- c(1, 10, 100, 1000, 10000, 45000, 60000)
+dur_cut <- cut(dur1$duration, dur_break, right = F)
+dur_freq <- as.matrix(table(dur_cut))
+rownames(dur_freq) <- c("1 - 10","10 - 100","100 - 1k", "1k - 10k", "10K - 45k", "45k - 60k")
+colnames(dur_freq) <- c("Outlier Freq Dist(duration)")
+dur_freq
+```
+
+
+```{r, warning=FALSE}
+
+#the extreme outlier in this data set is duration 58329 and its class value is "normal", being that class attribute, this data record can be deleted
+
+train_label_1<- subset(train_dist_newclass_label, train_dist_newclass_label[,"duration"] < 45000) #outlier deleted
+```
+
+##### 1.6.4.2. Attribute "Hot"
+
+```{r, warning=FALSE}
+
+#the extreme outlier in this data set is hot < 44 and its class is "normal", that can be deleted due to the imbalance of the class attribute
+
+train_label_2 <- subset(train_label_1, train_label_1[,"hot"] < 44) #outlier deleted
+```
+
+
+##### 1.6.4.3. Attribute "num_root"
+
+```{r, warning=FALSE}
+
+#the extreme outlier in this data set is num_root < 1743 and its class is "normal", that can be deleted due to the imbalance of the class attribute
+
+train_label_3 <- subset(train_label_2, train_label_2[,"num_root"] < 1743) #outlier deleted
+```
+
+
+##### 1.6.4.4. Other attributes with outliers
+
+src-bytes: Couldn't delete outliers because their class attribute value is TRUE and its deletition could affect the representation of this class as part of the model
+dst-bytes: Couldn't delete outliers because their class attribute value is TRUE and its deletition could affect the representation of this class as part of the model
+
+
+### 1.7. Analysis of non-numeric attributes
+#### 1.7.1. Barplot (Frequency Distribution)
+
+```{r, echo=FALSE,results='hide',fig.keep='all', warning=FALSE}
+par(mfrow = c (1,1))
+sapply(names(train_label_3), function(cname){
+  if(!is.numeric(train_label_3[[cname]]))
+    print(barplot(prop.table(table(train_label_3[[cname]])), main = cname, log = "", las = 2, cex.names = 0.7))
+})
+```  
+  
+
+### 1.8. All Attributes (numeric and non-numeric)
+
+#### 1.8.1. Near Zero Variance 
+
+
+The analysis of near zero variance will be useful during Dimensionality reduction process, there are various attributes that are considered Near to Zero Variance that potentially won't contribute significantly to the classification algorithm
+
+```{r, warning=FALSE}
+train_NZV <- nearZeroVar(train_label_3, saveMetrics = T)
+NZV_attribute <- rownames(train_NZV)
+NZV_true <- cbind(NZV_attribute,train_NZV) %>% filter(nzv == T)
+NZV_true
+```
+
+##### 1.8.1.1. Analysis of attribute "Land" 
+
+The attribute "land" can be decisive in the classification of land attacks, when land = 1; the positive attacks are catalogued as type land
+
+```{r, warning=FALSE}
+land1 <- subset(train_label_3[train_label_3$land == 1,], select = c("land","class"))
+land1
+barplot(prop.table(table(land1$class)), main = "proportion land", las = 2, cex.names = 0.7)
+```
+
+
+An analysis similar to the above can be applied to other factor attributes if their are selected as relevant when executing the feature selection process.
+
+
+##### 1.8.1.2. Analysis of attribute "num_outbound_cmds"
+
+The attribute num_outbound_cmds has only one value (0) in both Training (and also Test Dataset), it will be deleted from the dataset that is going to be used in further analysis
+
+```{r, warning=FALSE}
+train_label_4 <- subset(train_label_3, select = -c(num_outbound_cmds))
+```
+
+### 1.9. Transform levels for attribute "service"
+
+This attribute contain 70 levels (70 type of services), that for future, will be a problem for different algorithms (random forest can process up to 53 levels)
+
+```{r, warning=FALSE}
+service_att <- (table(subset(train_label_4, select = c(service, new_class))))
+service_att
+```
+
+
+Analyzing the distribution of each service regarding the new_class attribute, there are some similarities, for various of them, the whole distribution leans towards TRUE.
+
+As a method of reduction of levels, the types of services that have 900 or more observations, and all of them are valued as TRUE, will be renamed as a new service called "serv_true" 
+
+
+```{r, warning=FALSE}
+train_label_5 <- train_label_4
+```
+
+```{r, warning=FALSE}
+str(train_label_5$service)
+summary(train_label_5$service)
+```
+
+```{r, warning=FALSE}
+train_label_5$service <- as.character(train_label_5$service)
+```
+
+
+```{r, warning=FALSE}
+train_label_5$service[train_label_5$service == "bgp"] <- "serv_true"
+train_label_5$service[train_label_5$service == "courier"] <- "serv_true"
+train_label_5$service[train_label_5$service == "csnet_ns"] <- "serv_true"
+train_label_5$service[train_label_5$service == "ctf"] <- "serv_true"
+train_label_5$service[train_label_5$service == "daytime"] <- "serv_true"
+train_label_5$service[train_label_5$service == "discard"] <- "serv_true"
+train_label_5$service[train_label_5$service == "echo"] <- "serv_true"
+train_label_5$service[train_label_5$service == "efs"] <- "serv_true2"
+train_label_5$service[train_label_5$service == "exec"] <- "serv_true2"
+train_label_5$service[train_label_5$service == "gopher"] <- "serv_true2"
+train_label_5$service[train_label_5$service == "hostnames"] <- "serv_true2"
+train_label_5$service[train_label_5$service == "http_443"] <- "serv_true2"
+train_label_5$service[train_label_5$service == "iso_tsap"] <- "serv_true2"
+train_label_5$service[train_label_5$service == "klogin"] <- "serv_true2"
+train_label_5$service[train_label_5$service == "kshell"] <- "serv_true3"
+train_label_5$service[train_label_5$service == "ldap"] <- "serv_true3"
+train_label_5$service[train_label_5$service == "link"] <- "serv_true3"
+train_label_5$service[train_label_5$service == "login"] <- "serv_true3"
+train_label_5$service[train_label_5$service == "mtp"] <- "serv_true3"
+train_label_5$service[train_label_5$service == "name"] <- "serv_true3"
+train_label_5$service[train_label_5$service == "netbios_dgm"] <- "serv_true3"
+train_label_5$service[train_label_5$service == "netbios_ns"] <- "serv_true4"
+train_label_5$service[train_label_5$service == "netbios_ssn"] <- "serv_true4"
+train_label_5$service[train_label_5$service == "netstat"] <- "serv_true4"
+train_label_5$service[train_label_5$service == "nnsp"] <- "serv_true4"
+train_label_5$service[train_label_5$service == "nntp"] <- "serv_true4"
+train_label_5$service[train_label_5$service == "pop_2"] <- "serv_true4"
+train_label_5$service[train_label_5$service == "printer"] <- "serv_true4"
+train_label_5$service[train_label_5$service == "remote_job"] <- "serv_true5"
+train_label_5$service[train_label_5$service == "rje"] <- "serv_true5"
+train_label_5$service[train_label_5$service == "sql_net"] <- "serv_true5"
+train_label_5$service[train_label_5$service == "sunrpc"] <- "serv_true5"
+train_label_5$service[train_label_5$service == "supdup"] <- "serv_true5"
+train_label_5$service[train_label_5$service == "systat"] <- "serv_true5"
+train_label_5$service[train_label_5$service == "uucp"] <- "serv_true6"
+train_label_5$service[train_label_5$service == "uucp_path"] <- "serv_true6"
+train_label_5$service[train_label_5$service == "vmnet"] <- "serv_true6"
+train_label_5$service[train_label_5$service == "whois"] <- "serv_true6"
+train_label_5$service[train_label_5$service == "Z39_50"] <- "serv_true6"
+
+```
+
+```{r, warning=FALSE}
+train_label_5$service <- as.factor(train_label_5$service)
+```
+
+
+```{r, warning=FALSE}
+str(train_label_5$service)
+summary(train_label_5$service)
+```
+
+## 2. BIVARIATE ANALYSIS (TRAINING DATASET)
+
+### 2.1. Subset datasets 
+
+
+```{r, warning=FALSE}
+#create data subsets for numeric attributes
+train_num <- dplyr::select_if(train_label_5, is.numeric)
+```
+
+```{r, warning=FALSE}
+#create data subsets for non numeric attributes
+train_nonum <- select(train_label_5, -one_of(colnames(train_num)))
+```
+
+
+### 2.2. Correlation Analysis (Numeric Subset Only)
+
+```{r, echo=FALSE,results='hide',fig.keep='all', warning=FALSE}
+gc() #free up memory
+```
+
+
+```{r, echo=FALSE,results='hide',fig.keep='all', warning=FALSE}
+#correlation in a dataframe
+train_cor_num <- round(cor(train_num, method = "pearson"),4)
+train_cor_num[lower.tri(train_cor_num, diag = T)] <-  NA
+train_cor_num <- as.data.frame(as.table(train_cor_num))
+train_cor_num <- na.omit(train_cor_num)
+train_cor_num <- train_cor_num[order(-abs(train_cor_num$Freq)),]
+
+```
+
+
+#### 2.2.1. Positive and negative correlation Analysis (Numeric subset only)
+
+```{r, echo=FALSE,results='hide',fig.keep='all', warning=FALSE}
+
+#Data results filtered only for correlation higher than 0.7 and lower than -0.7
+
+cor_fil1 <- train_cor_num %>% filter_all(any_vars(.> 0.7)) #positive high correlation
+cor_fil2 <- train_cor_num %>% filter_all(any_vars(.< -0.7 )) #negative high correlation
+cor_fil1
+cor_fil2
+```
+
+
+There are various attributes that are correlated to each other, most of them are rates, which are attributes calculated from others. It is not recommended to delete them without having specific knowledge on the field.
+
+During the process of dimensionality reduction, the correlated attributes will be evaluated and discarded as needed.
+
+
+
+#### 2.2.2. Positive Correlation Analysis (num_root ~ num_compromised, warning=FALSE)
+
+In order to verify the high positive correlation between the variables that are predominantly value = 0, two new subsets were created:
+
+test3 - shows the records in which num_root is different than 0
+test4 - shows the records in which num_root and num_compromised are different than 0
+
+
+```{r, warning=FALSE}
+test2 <- subset(train_label_1, select = c(num_root, num_compromised))
+test3 <- test2 %>% filter(num_root != 0)
+test4 <- test2 %>% filter(num_root != 0 & num_compromised != 0)
+
+cor(test3$num_root, test3$num_compromised)
+cor(test4$num_root, test4$num_compromised)
+
+plot(test3$num_root, test3$num_compromised, main = "num_root != 0")
+plot(test4$num_root, test4$num_compromised, main = "num_root != 0 & num_compromised != 0")
+```
+
+Conclusion: There is a true correlation between the variables since the majority of the results (value = 0) were discarded and still the correlation looks the same.
+Assumption: The behavior will be the same for the other variables that are highly correlated, further analysis will be executed when the features for the algorithm are selected.
+
+
+#### 2.2.3. Negative Correlation Analysis (same_srv_rate ~ dst_host_srv_serror_rate)
+
+
+The same concept was applied to the negative correlation, in this case, same_srv_rate was described as predominantly = 1, and dst_host_srv_serror_rate is predominantly = 0, discarding those values, we could notice that the correlation between the remaining results is only -0.32
+
+```{r, warning=FALSE} 
+
+test5 <- subset(train_label_1, select = c(same_srv_rate, dst_host_srv_serror_rate))
+
+hist(test5$same_srv_rate)
+hist(test5$dst_host_srv_serror_rate)
+
+test6 <- test5 %>% filter(same_srv_rate != 1 & dst_host_srv_serror_rate != 0) 
+
+cor(test6$same_srv_rate, test6$dst_host_srv_serror_rate) #funciona
+
+plot(test6$same_srv_rate, test6$dst_host_srv_serror_rate, main = "same_srv_rate != 1 & dst_host_srv_serror_rate != 0") 
+```
+
+
+### 2.3. Chi-Square Test of Independence (Correlation Analysis) (Numeric Subset Only - compared to class attribute)
+
+In order to determine which of the numerical attributes are dependent or correlated to the class attribute "new_class", the use of Chi-square analysis has been extended to the numerical attributes as well.
+
+The results with a high Chi-Square value and a p-value lower than 0.05 (alpha), can be labeled as correlated to the class attribute.
+
+
+```{r warning=FALSE}
+chisq_num <- vector() #empty vector
+chisq_num_stat <- vector()
+chisq_num_pval <- vector()
+chisq_num_colname <- vector()
+
+for (n in (colnames(train_num))) {
+  chisq_num <- chisq.test(train_num[[as.character(n)]], train_label_5$new_class, correct = F)
+  
+  chisq_num_stat <- c(chisq_num_stat, round(chisq_num[["statistic"]][[1]],0))
+  chisq_num_pval <- c(chisq_num_pval, round(chisq_num[["p.value"]][[1]],2))
+}
+
+chisq_result_colnames_num <- colnames(train_num)
+
+chisq_result_df_num <- as.data.frame(cbind(chisq_result_colnames_num, chisq_num_stat, chisq_num_pval))
+colnames(chisq_result_df_num) <- c("Attribute","Chi-squared value","p-value")
+
+chisq_result_df_num
+```
+
+When chi-square is high, and p-value is low than alpha = 0.05, that indicates that the both variables are dependent to each other
+
+Conclusion: "Urgent" is the only numeric variable that is not correlated to the class attribute "new_class".
+
+### 2.4. Chi-Square Test of Independence (Correlation Analysis) (Non-Numeric Subset Only) against class attribute
+
+
+```{r warning=FALSE}
+chisq_nonum <- vector() #empty vector
+chisq_nonum_stat <- vector()
+chisq_nonum_pval <- vector()
+chisq_nonum_colname <- vector()
+
+for (n in (colnames(train_nonum))) {
+  chisq_nonum <- chisq.test(train_nonum[[as.character(n)]], train_label_5$new_class, correct = F)
+  
+  chisq_nonum_stat <- c(chisq_nonum_stat, round(chisq_nonum[["statistic"]][[1]],0))
+  chisq_nonum_pval <- c(chisq_nonum_pval, round(chisq_nonum[["p.value"]][[1]],2))
+}
+
+chisq_result_colnames_nonum <- colnames(train_nonum)
+
+chisq_result_df_nonum <- as.data.frame(cbind(chisq_result_colnames_nonum, chisq_nonum_stat, chisq_nonum_pval))
+colnames(chisq_result_df_nonum) <- c("Attribute","Chi-squared value","p-value")
+
+chisq_result_df_nonum
+```
+
+When chi-square is high, and p-value is low than alpha = 0.05, that indicates that the both variables are dependent to each other
+
+The only variable listed above that is not predictor of new_class is "is_host_login", this fact will be confirmed during the feature selection process.
+
+NOTE: Not sure if the approach was correct.
+
+
+### 2.5. Remove original class attribute
+
+```{r, warning=FALSE}
+train_label_6 <- subset(train_label_5, select = -c(class)) #original "class" attribute dropped
+```
+
+
+## 3. Feature Selection
+
+### 3.1. Backward Elimination
+
+Test with all the variables excepting num_outbound_cmds and class (original)
+
+```{r echo=TRUE, warning=FALSE}
+fitall <- lm(new_class ~ ., data = train_label_6)
+```
+
+
+```{r echo=TRUE, warning=FALSE}
+step(fitall, direction = "backward") #includes almost all the variables
+```
+
+Backward Elimination suggests the deletetion of dst_host_same_srv_rate
+
+
+### 3.2. Gain (FSelectorRcpp)
+
+```{r echo=TRUE, warning=FALSE}
+train_label_6_noclass <- subset(train_label_6, select = -c(new_class))
+train_gain <- information_gain(x = train_label_6_noclass, y = train_label_6$new_class)
+train_gain <- train_gain[order(train_gain$importance),]
+train_gain
+  
+```
+
+### 3.3. Gain (FSelector)
+
+```{r echo=TRUE, warning=FALSE}
+gc()
+```
+
+```{r echo=TRUE, warning=FALSE}
+options(java.parameters = "-Xmx12g") #configure RAM for Java
+
+```
+
+```{r echo=TRUE, warning=FALSE}
+#train_gain2 <- information.gain(new_class ~., train_label_6) #not enough memory, it used to work before
+``` 
+
+```{r, warning=FALSE}
+#train_gain2a <- cbind(row.names(train_gain2),(train_gain2[order(train_gain2$attr_importance),]))
+#colnames(train_gain2a) <- c("attribute", "importance(gain)")
+#as.data.frame(train_gain2a)
+
+```
+
+### 3.4. Attributes to be discarded
+
+#### 3.4.1. Feature selection (First Stage)
+
+As a second stage of dimensionality reduction, three results previously obtained will be leveraged: Near Zero Variance, Correlation between numeric attributes, Chi-Square dependency to the class attribute
+
+```{r, warning=FALSE}
+train_label_7 <- subset(train_label_6, select = -c(dst_host_rerror_rate, dst_host_serror_rate, dst_host_srv_count, num_compromised, rerror_rate, same_srv_rate, serror_rate, srv_rerror_rate, srv_serror_rate, dst_host_srv_serror_rate))
+```
+
+#### 3.4.2. Backward Elimination & Forward Selection
+
+```{r, warning=FALSE}
+train_label_8 <- subset(train_label_7, select = -c(dst_host_same_srv_rate))
+```
+
+Note: Forward Selection was runned offline suggesting to delete "srv_diff_host_rate", the process took more than an hour, so it is not worth it to process it again.
+
+```{r, warning=FALSE}
+train_label_9 <- subset(train_label_8, select = -c(srv_diff_host_rate))
+```
+
+#### 3.4.3. Gain (FSelectorRcpp)
+
+```{r, warning=FALSE}
+train_label_10 <- subset(train_label_9, select = -c(urgent, num_failed_logins))
+```
+
+#### 3.4.4. Gain ((FSelector))
+
+```{r, warning=FALSE}
+train_label_11 <- subset(train_label_10, select = -c(duration, protocol_type))
+```
+
+## 4. Data preparation for modeling
+
+### 4.1. Undersampling (balance of data)
+
+The original dataset contains more than 1 million observations, that makes the modeling process very complex when the computation resources are limited. 
+
+The dataset will be undersampled to 300,000 records, a random process will be used to balance the dependent attribute with the same representation.
+
+Class attribute must be converted to factor in order to process a sampling function
+
+```{r, warning=FALSE}
+train_label_11$new_class <- as.factor(train_label_11$new_class)
+
+```
+
+The sampling method used will reduce the number of "FALSE" observations and while maintaining and compensating (if needed) the "TRUE" observations
+
+```{r, warning=FALSE}
+data_12 <- ovun.sample(new_class ~., data = train_label_11, method = "both", N = 300000, seed = 2)$data 
+
+```
+
+```{r, warning=FALSE}
+summary(data_12) 
+
+```
+
+### 4.2. Analysis of attributes after Sampling process
+
+Attribute "is_host_login" have a huge imbalance that cuould potentially cause problems during the modeling process due to underrepresentation of classes (zero variance) after sampling, that's why it will be excluded from the analysis going forward
+
+```{r echo=TRUE, warning=FALSE}
+table(data_12$is_host_login) #test
+
+```
+
+```{r, warning=FALSE}
+data_12 <- subset(data_12, select = -c(is_host_login))
+```
+
+Attribute "service" has lost representation of various of the levels. There are not records under Aol, http_2784 and for cases as http_8001 or pm_dump there are a couple of examples of types of service that have to be adhered to a most representative type of service to avoid problems during slicing of data and the cross-validation sections. This action would potentially lead to a reduction of the accuracy of the model having service is one of the most important predictors.
+
+
+```{r, warning=FALSE}
+summary(data_12$service)
+```
+
+Observations that after the supsampling have 20 or less records under an specific type of service will be assing to the "other" level
+
+```{r, warning=FALSE}
+data_12$service[data_12$service == "http_8001"] <- "other"
+data_12$service[data_12$service == "pm_dump"] <- "other"
+data_12$service[data_12$service == "red_i"] <- "other"
+data_12$service[data_12$service == "tftp_u"] <- "other"
+data_12$service[data_12$service == "urh_i"] <- "other"  #does not exist in the real test data
+
+data_12$service <- droplevels(data_12$service)
+```
+
+```{r, warning=FALSE}
+summary(data_12$service)
+```
+
+### 4.2.1. Distribution of numeric attributes
+
+The following analisys reflects that for some attributes the balance has been enhanced, meaning that the most representative values (mostly 0) was present in the attacks selected as "FALSE"
+
+```{r, results='hide',fig.keep='all', warning=FALSE}
+par(mfrow = c (2,2))
+sapply(names(data_12), function(cname){
+  if(is.numeric(data_12[[cname]]))
+    print(hist(data_12[[cname]], main = cname))
+})
+
+```
+
+### 4.2.2. Distribution of non-numeric attributes
+
+```{r, results='hide',fig.keep='all', warning=FALSE}
+par(mfrow = c (1,1))
+sapply(names(data_12), function(cname){
+  if(!is.numeric(data_12[[cname]]))
+    print(barplot(prop.table(table(data_12[[cname]])), main = cname, log = "", las = 2, cex.names = 0.7))
+})
+``` 
+
+### 4.3. Normalization (training set - numeric attributes only)
+
+```{r, warning=FALSE}
+#create data subsets for numeric attributes
+data_12_num<- dplyr::select_if(data_12, is.numeric)
+```
+
+```{r, warning=FALSE}
+#create data subsets for non numeric attributes
+data_12_nonum <- select(data_12, -one_of(colnames(data_12_num)))
+```
+
+```{r, warning=FALSE}
+data_12_num_norm <- as.data.frame(apply(data_12_num, 2, function(x) (x - min(x))/(max(x)-min(x)))) #normalization function
+
+```
+
+```{r, warning=FALSE}
+data_13 <- cbind(data_12_num_norm, data_12_nonum) #join together num & class attribute
+
+```
+
+
+-----
+
+### 4.4. Data Slicing (Training and Validation)
+
+```{r, warning=FALSE}
+set.seed(1)
+intrain <- createDataPartition(y = data_13$new_class, p= 0.7, list = FALSE)
+train_data <- data_13[intrain,]
+test_data <- data_13[-intrain,]
+```
+
+```{r, warning=FALSE}
+str(train_data)
+```
+
+## 5. Classification Modeling
+### 5.1. Random Forest Algorithm Implementation
+
+
+```{r echo=TRUE, warning=FALSE}
+gc()
+  
+```
+
+```{r echo=TRUE, warning=FALSE}
+rfImp <- randomForest(new_class ~., data = train_data, ntree = 100, importance = TRUE) 
+importance(rfImp)
+```
+
+#### 5.1.1. Analysis (Error Rate VS Trees)
+
+```{r echo=TRUE, warning=FALSE}
+
+plot(rfImp, main = "Error Rate VS Trees")
+rfImp.legend <- if (is.null(rfImp$test$err.rate)) {colnames(rfImp$err.rate)} else {colnames(rfImp$test$err.rate)}
+
+legend("top", cex =0.7, legend = rfImp.legend, lty=c(1,2,3), col=c(1,2,3), horiz=T)
+
+```
+NOTE: The plot (error rate VS trees) explains that for the random forest algorithg for 15 or less tress, the level of randomness is high, leading to a higher error rate, after 20 tress the behaviour is virtually flat.
+
+##### 5.1.1.1. Confusion Matrix
+
+```{r, warning=FALSE}
+print(rfImp)
+```
+
+#### 5.1.2. Mean Decrease Accuracy
+
+```{r, warning=FALSE}
+varImpPlot(rfImp, sort = T, n.var = 10, main = "Top 10 - Variable Importance - Mean Decrease Accuracy", type = 1)
+```
+
+Note: The ranking product of this analysis is to get a ranking of the variables, that will be used in further investigation more than an actual measure of the present model. Mean Decrease in Accuracy is also called as Permutation Importance.
+
+#### 5.1.3. Mean Decrease Gini
+
+```{r, warning=FALSE}
+varImpPlot(rfImp, sort = T, n.var = 10, main = "Top 10 - Variable Importance - Mean Decrease Gini", type = 2)
+```
+
+NOTE: A higher Mean Decrease Gini indicates higher variable importance. Evidencing again that service is the most important attribute in this model 
+
+### 5.1.4. Prediction on Training Dataset
+
+```{r, warning=FALSE}
+train_data2 <- train_data
+train_data2$predicted.response = predict(rfImp, train_data2)
+```
+
+##### 5.1.4.1. Confusion Matrix
+
+```{r, warning=FALSE}
+print(confusionMatrix(data = train_data2$predicted.response, reference = train_data2$new_class, positive = "TRUE"))
+```
+Note: Accuracy on the training dataset is high, surprisingly, the reduction on service classes, undersampling and new definition on class attribute did not impact the model definition.
+
+### 5.1.5. Prediction on Testing Dataset
+
+```{r, warning=FALSE}
+test_data2 <- test_data
+test_data2$predicted.response = predict(rfImp, test_data2)
+```
+
+#### 5.1.5.1. Confusion Matrix
+
+```{r, warning=FALSE}
+print(confusionMatrix(data = test_data2$predicted.response, reference = test_data2$new_class, positive = "TRUE"))
+```
+
+Accuracy on the classification of the test dataset is 99.96%, this could be due the data is a subset of the original dataset. For further analysis, this model could be replicated on the the original test dataset provided by KDD.
+
+
+### 5.2. Logistic Regression Algorithm Implementation
+
+```{r, warning=FALSE}
+train_data3 <- train_data #a copy of the dataset
+log_model <- glm(new_class ~ ., data = train_data3, family = binomial)
+```
+
+```{r, warning=FALSE}
+summary(log_model)
+```
+
+All the attributes selected for this model are statistically significant
+
+#### 5.2.1. Analysis of Variance (ANOVA)
+
+```{r, warning=FALSE}
+anova(log_model, test = "Chisq")
+```
+
+Notes about ANOVA:
+
+- src_bytes and dst_bytes are not significant
+- dst_host_srv_diff_host_rate actually increases the residual deviance, for future the variable can be dropped to see the difference
+- service and flag provides the more drop on the residual deviance while being statistically significant
+- A large p-value indicates that the model without the variable explains more or less the same amount of variation
+- The intention here is to see a drop in deviance and AIC
+
+#### 5.2.2. Prediction on the train dataset
+
+```{r, warning=FALSE}
+train_data3$predicted.response <- predict(log_model, train_data3, type = "response")
+```
+
+##### 5.2.2.1. Confusion Matrix
+
+```{r, warning=FALSE}
+confusionMatrix(data = as.factor(as.logical(as.numeric(train_data3$predicted.response >0.5))), reference = train_data3$new_class)
+```
+Predition is less accurate than the Random Forest, but still pretty high. 
+
+#### 5.2.3. Prediction on the test dataset
+
+```{r, warning=FALSE}
+#prediction of data on the testing dataset
+test_data3 <- test_data #a copy of the dataset
+test_data3$predicted.response <- predict(log_model, test_data3, type = "response")
+```
+
+##### 5.2.3.1. Confusion Matrix
+
+```{r, warning=FALSE}
+confusionMatrix(data = as.factor(as.logical(as.numeric(test_data3$predicted.response >0.5))), reference = test_data3$new_class)
+```
+
+Accuracy is much better than in the training dataset. Analysis with original testing dataset would be important to validate the accuracy of the model.
+
+
+RESULT: The Random forest algorithm performs better when predicting the class attribute, for that reason additional analysis will be executed only using just Random Forest.
+
+
+# ADDITIONAL ANALYSIS
+
+## 1. Test with manual 10 Fold
+
+A 10-fold cross validation analysis will be performed, to confirm the performance of the Random Forest Classifier. The goal is to test the model capacity to predict new data that was not used to estimate it,  also to identify problems with overfitting or biased selection (non-random selection), a loop will run 10 times, creating new training and test dataset, the accuracy will be measure for every iteration. The results will confirm the performance of the prediction model.
+
+```{r, warning=FALSE}
+#create folds
+num_folds <- createFolds(data_13$new_class, k = 10)
+```
+
+```{r, warning=FALSE}
+# create loop for 10 folds
+for (f in num_folds){
+  
+  fold_train <- data_13[-f,]
+  fold_test <- data_13[f,] 
+  
+  #random forest for train
+  set.seed(10)
+  rfImp <- randomForest(new_class ~., data = fold_train, ntree = 3, importance = TRUE) #desired 200
+  
+  fold_train2 <- fold_train #duplicated dataset
+  fold_train2$pred_res <- predict(rfImp, fold_train2)
+
+  print("Confusion matrix - Training")
+  
+  cm <- confusionMatrix(data = fold_train2$pred_res, reference = fold_train2$new_class, positive = "TRUE")
+  print(cm$overall['Accuracy'])
+  
+  #random forest for test
+  
+  set.seed(10)
+  rfImp <- randomForest(new_class ~., data = fold_test, ntree = 3, importance = TRUE) #desired 200
+  
+  fold_test2 <- fold_test #duplicated dataset
+  fold_test2$pred_res <- predict(rfImp, fold_test2)
+
+  print("Confusion matrix - Testing")
+  
+  cm <- confusionMatrix(data = fold_test2$pred_res, reference = fold_test2$new_class, positive = "TRUE")
+  print(cm$overall['Accuracy'])
+ 
+}
+```
+
+RESULTS: After applying a 10-fold cross validation model it was ratified that the performance on the testing dataset performs at more than 99%
+
+## 2. Prediction on the Training Dataset provided by KDD 
+
+### 2.1. Data Preparation (same as training dataset)
+
+To make a fare analysis on the real dataset, it is required to apply similar processing on the data.
+
+#### 2.1.1. Load Data
+```{r, warning=FALSE}
+real_test_data <- read.csv("D:\\0 - Julian\\2 - Ryerson\\136 - Capstone\\1 - Project\\1 - Work\\Data\\1 - Distinct\\test_label_distinct.csv", header = F)
+```
+
+#### 2.1.2. Load Column Names
+
+```{r, warning=FALSE}
+real_test_colnames_newclass <- c("duration", "protocol_type", "service", "flag", "src_bytes", "dst_bytes", "land", "wrong_fragment", "urgent", "hot", "num_failed_logins", "logged_in", "num_compromised", "root_shell", "su_attempted", "num_root", "num_file_creations", "num_shells", "num_access_files", "num_outbound_cmds", "is_host_login", "is_guest_login", "count", "srv_count", "serror_rate", "srv_serror_rate", "rerror_rate", "srv_rerror_rate", "same_srv_rate", "diff_srv_rate", "srv_diff_host_rate", "dst_host_count", "dst_host_srv_count", "dst_host_same_srv_rate", "dst_host_diff_srv_rate", "dst_host_same_src_port_rate", "dst_host_srv_diff_host_rate", "dst_host_serror_rate", "dst_host_srv_serror_rate", "dst_host_rerror_rate", "dst_host_srv_rerror_rate", "class", "new_class")
+
+real_test_label<- setNames(real_test_data, real_test_colnames_newclass)
+```
+
+#### 2.1.3. Change type of variable
+
+```{r, warning=FALSE}
+real_test_label$land <- as.factor((real_test_label$land))
+real_test_label$logged_in <- as.factor((real_test_label$logged_in))
+real_test_label$root_shell <- as.factor((real_test_label$root_shell))
+real_test_label$su_attempted <- as.factor((real_test_label$su_attempted))
+real_test_label$is_host_login <- as.factor((real_test_label$is_host_login))
+real_test_label$is_guest_login <- as.factor((real_test_label$is_guest_login))
+```
+
+#### 2.1.4. Reduce # of attribute service levels
+
+```{r, warning=FALSE}
+#initial state
+real_test_label$service <- as.factor(real_test_label$service)
+```
+
+```{r, warning=FALSE}
+levels(real_test_label$service)
+```
+
+```{r, warning=FALSE}
+real_test_label$service <- as.character(real_test_label$service)
+```
+
+```{r, warning=FALSE}
+real_test_label$service[real_test_label$service == "bgp"] <- "serv_true"
+real_test_label$service[real_test_label$service == "courier"] <- "serv_true"
+real_test_label$service[real_test_label$service == "csnet_ns"] <- "serv_true"
+real_test_label$service[real_test_label$service == "ctf"] <- "serv_true"
+real_test_label$service[real_test_label$service == "daytime"] <- "serv_true"
+real_test_label$service[real_test_label$service == "discard"] <- "serv_true"
+real_test_label$service[real_test_label$service == "echo"] <- "serv_true"
+real_test_label$service[real_test_label$service == "efs"] <- "serv_true2"
+real_test_label$service[real_test_label$service == "exec"] <- "serv_true2"
+real_test_label$service[real_test_label$service == "gopher"] <- "serv_true2"
+real_test_label$service[real_test_label$service == "hostnames"] <- "serv_true2"
+real_test_label$service[real_test_label$service == "http_443"] <- "serv_true2"
+real_test_label$service[real_test_label$service == "iso_tsap"] <- "serv_true2"
+real_test_label$service[real_test_label$service == "klogin"] <- "serv_true2"
+real_test_label$service[real_test_label$service == "kshell"] <- "serv_true3"
+real_test_label$service[real_test_label$service == "ldap"] <- "serv_true3"
+real_test_label$service[real_test_label$service == "link"] <- "serv_true3"
+real_test_label$service[real_test_label$service == "login"] <- "serv_true3"
+real_test_label$service[real_test_label$service == "mtp"] <- "serv_true3"
+real_test_label$service[real_test_label$service == "name"] <- "serv_true3"
+real_test_label$service[real_test_label$service == "netbios_dgm"] <- "serv_true3"
+real_test_label$service[real_test_label$service == "netbios_ns"] <- "serv_true4"
+real_test_label$service[real_test_label$service == "netbios_ssn"] <- "serv_true4"
+real_test_label$service[real_test_label$service == "netstat"] <- "serv_true4"
+real_test_label$service[real_test_label$service == "nnsp"] <- "serv_true4"
+real_test_label$service[real_test_label$service == "nntp"] <- "serv_true4"
+real_test_label$service[real_test_label$service == "pop_2"] <- "serv_true4"
+real_test_label$service[real_test_label$service == "printer"] <- "serv_true4"
+real_test_label$service[real_test_label$service == "remote_job"] <- "serv_true5"
+real_test_label$service[real_test_label$service == "rje"] <- "serv_true5"
+real_test_label$service[real_test_label$service == "sql_net"] <- "serv_true5"
+real_test_label$service[real_test_label$service == "sunrpc"] <- "serv_true5"
+real_test_label$service[real_test_label$service == "supdup"] <- "serv_true5"
+real_test_label$service[real_test_label$service == "systat"] <- "serv_true5"
+real_test_label$service[real_test_label$service == "uucp"] <- "serv_true6"
+real_test_label$service[real_test_label$service == "uucp_path"] <- "serv_true6"
+real_test_label$service[real_test_label$service == "vmnet"] <- "serv_true6"
+real_test_label$service[real_test_label$service == "whois"] <- "serv_true6"
+real_test_label$service[real_test_label$service == "Z39_50"] <- "serv_true6"
+```
+
+
+#### 2.1.5. Service level adjustment 
+
+- After the undersampling of the training dataset, some of the levels became non-representative (records with this type of service were less than 20) 
+- Additionally 2 of the level that are part of the real dataset don't exist in the training dataset, they will be converted to other, to avoid problems during the modeling stage.
+
+```{r, warning=FALSE}
+real_test_label$service[real_test_label$service == "http_8001"] <- "other"
+real_test_label$service[real_test_label$service == "pm_dump"] <- "other"
+real_test_label$service[real_test_label$service == "red_i"] <- "other"
+real_test_label$service[real_test_label$service == "tftp_u"] <- "other"
+
+real_test_label$service[real_test_label$service == "icmp"] <- "other" #does not exist in training data
+real_test_label$service[real_test_label$service == "tim_i"] <- "other" #does not exist in training data
+
+```
+
+
+```{r, warning=FALSE}
+#initial state
+real_test_label$service <- as.factor(real_test_label$service)
+```
+
+```{r, warning=FALSE}
+real_test_label$service <- droplevels(real_test_label$service) #drop levels with 0 records
+```
+
+```{r, warning=FALSE}
+levels(real_test_label$service)
+```
+
+#### 2.1.6. Dimensionality Reduction
+
+During the preparation of the Training dataset, some of the attributes were discarded due to their low impact in the dependent variable, in order to perform a prediction modeling, the dataset is required have the same and the same number of dimension (# of attributes)
+
+```{r, warning=FALSE}
+real_test_label1 <- subset(real_test_label, select = -c(num_outbound_cmds)) #zero variance
+real_test_label2 <- subset(real_test_label1, select = -c(class)) #class attribute
+real_test_label3 <- subset(real_test_label2, select = -c(dst_host_rerror_rate, dst_host_serror_rate, dst_host_srv_count, num_compromised, rerror_rate, same_srv_rate, serror_rate, srv_rerror_rate, srv_serror_rate, dst_host_srv_serror_rate)) #first stage - correlation
+real_test_label4 <- subset(real_test_label3, select = -c(dst_host_same_srv_rate, srv_diff_host_rate, urgent, num_failed_logins, duration, protocol_type, is_host_login)) # backward, forward, FSelector, FSelectorRcpp and sampling
+```
+
+#### 2.1.7. Normalization
+
+Numeric data attributes will be scale to values from 0 and 1, in te same way as the training dataset, this process will avoid bias during the prediction process, since the range of the numerical variables will be the same.
+
+```{r, warning=FALSE}
+real_test_label4$new_class <- as.factor(as.logical(real_test_label4$new_class))
+```
+
+```{r, warning=FALSE}
+real_test_label4_num<- dplyr::select_if(real_test_label4, is.numeric)
+```
+
+```{r, warning=FALSE}
+real_test_label4_nonum <- select(real_test_label4, -one_of(colnames(real_test_label4_num)))
+```
+
+```{r, warning=FALSE}
+real_test_label4_num_norm <- as.data.frame(apply(real_test_label4_num, 2, function(x) (x - min(x))/(max(x)-min(x)))) #normalization function
+```
+
+```{r, warning=FALSE}
+real_test_label5 <- cbind(real_test_label4_num_norm, real_test_label4_nonum) #join together num & class attribute
+```
+
+```{r, warning=FALSE}
+str(real_test_label5)
+```
+
+
+#### 2.1.8. Comparison of structure: Training Dataset VS Real Test Dataset
+
+The randomForest and predict functions require that both datasets have the same structure. That's why a last verification before processing is considered a good practice.
+
+```{r, warning=FALSE}
+real_test_6 <- real_test_label5 #duplicate
+```
+
+```{r, warning=FALSE}
+str(train_data)
+```
+
+
+```{r, warning=FALSE}
+str(real_test_6)
+```
+
+```{r, warning=FALSE}
+levels(real_test_6$service)
+```
+
+```{r, warning=FALSE}
+levels(train_data$service)
+```
+
+### 2.2. Prediction on Real Test Dataset
+
+As mentioned early in this chapter, the Dataset provided by KDD in their repository will be used to confirm the performance of the model created
+
+```{r, warning=FALSE}
+real_test_6$predicted.response = predict(rfImp, real_test_6)
+```
+
+Confusion Matrix
+
+```{r, warning=FALSE}
+print(confusionMatrix(data = real_test_6$predicted.response, reference = real_test_6$new_class, positive = "TRUE"))
+```
+
+Conclusion:
+
+The result of the prediction against the new data set is (93%), considered very good, since the data was extracted differently and was mentioned in various research papers that was distributed differently.
+
+# FINAL RESULTS
+## 1. RECOMMENDATIONS
+
+-	Perform the part of the processing required for this project in a distributed type of environment, 4MM records x 43 attributes will be difficult to be handled by R in a consumer type of computer. Data cleaning and data preparation stages performed better in Hive that in R.
+-	Find the proper methodology that will allow executing processes like Variable Independence and Feature Selection to be developed in parallel (another script file in the project), and only the results are to be leveraged as part of the core piece of programming. Rely on one document for every calculation demands high processing resources and a long waiting time in processing while generating the partial reports. 
+-	Analyze further the relationship between categorical attributes, not only each of them against the class attribute rather each of the independent attributes against each other.
+-	Find a better method to analyze the impact of each of the different levels part of the “Service” attribute, looking for an alternative to scale down the number of services evaluated. Domain Knowledge in this field might be required.
+-	Investigate further on the behavior of the variables like “wrong fragment” and “num_access_files” and their outliers, implementing a method of imputation like to K-Nearest Neighbors.
+-	Investigate further in the appropriated methodology that will allow transforming the numeric attributes to reduce partially the concentration of records to value zero (0). Example, Log Transformation.
+-	Implement a Cross-Validation across the modeling process, reducing the oversampling on the datasets.
+
+## 2. FUTURE WORK
+For future work on this project, the following tasks can be executed
+-	Reduce the number of attributes to a maximum of 15, in order to compare the results against the 28 attributes chosen for this project. Example: Near-Zero Variance Analysis suggested the deletion of various attributes, that could be a good point of start
+-	Since the scope for this project was narrowed to be a binary classification problem, it will be interesting to create a model that is able to classify within the 22 types of different attacks.
+-	Make a comparison between the performance of the dataset that contains duplicates (raw data) and the dataset used for this project.
+-	Perform the modeling process on a dataset that hasn’t been subsampled and compares the results with the present document. 
+-	Produce curves and calculations like ROC (Receiver Operating Characteristics) and AUC (Area Under Curve) that will allow comparing better the performance between the Random Forest and Logistic Regression classification models.
+-	Perform Principal Component Analysis and use resultant data for classification modeling.
+
+## 3. CONCLUSIONS
+
+-	Results of accuracy in more than 90% allow to think that the model is overfitted, Further analysis of the dataset used for modeling will be required, techniques to prevent overfittings like early cross-validation, strict feature selection, outlier treatment, or regularization might be required to improve the classification model.
+-	“src_bytes” and “dst_bytes” are some of the more relevant attributes for the classification model.
+-	Analysis on numeric attributes demonstrated that data was concentrated in values close to zero, Near Zero Variance Algorithm suggested the deletion of 19 of the 42 attributes (45% of independent variables), this two facts evidence that set in its integrity was concentrated giving few spaces for analysis of outliers or univariate clustering for identification of patterns.
+-	Data processing using R instead of a distributed computing environment increases the processing time for tasks related to data analysis and data cleaning, find the right balance or look for integration methodologies will allow that further analysis could be executed in a reduced time frame and will allow optimization of computing resources.
+-	Further investigation in Intrusion Detection Systems will help interpret better the dataset used as part of this document, type of service and type of flags could be consolidated in fewer levels, allowing the model to perform better.
+-	Domain knowledge will help to understand better the impact of the different rates included as part of the dataset, giving the chance to add value to the additional processing time required when dealing with 43 attributes in a dataset of 4 million records.
+-	Random Forest algorithm performed slightly better than logistic regression for this classification problem, but as the results for accuracy were very high, there is no preference for any of them.
